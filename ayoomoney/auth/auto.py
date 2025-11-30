@@ -1,7 +1,9 @@
 from http.server import BaseHTTPRequestHandler
 from contextlib import closing
+from pathlib import Path
 import socketserver
 import socket
+import ssl
 
 from .base import Authorization, DEFAULT_SCOPE
 from ayoomoney.errors import CreateTokenError
@@ -30,8 +32,10 @@ class CodeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if "code=" not in self.path:
             self.send_response(400)
+            self.send_header("charset", "windows-1251")
             self.end_headers()
-            return
+            self.wfile.write("auth.auth canceled".encode("windows-1251"))
+            raise SystemExit()
 
         code = self.path.split("code=")[-1]
         access_token = ""
@@ -54,6 +58,7 @@ class CodeHandler(BaseHTTPRequestHandler):
         self.send_header("charset", "windows-1251")
         self.end_headers()
         self.wfile.write(body.encode("windows-1251"))
+        raise SystemExit()
 
 
 def authorize(
@@ -61,6 +66,7 @@ def authorize(
         redirect_uri: str,
         scope: list[str] = DEFAULT_SCOPE,
         host: str = HOST, port: int = PORT,
+        cert: str = "", key: str = "",
         *_
 ) -> str | None:
     if not is_port_free(host, port):
@@ -72,7 +78,7 @@ def authorize(
             "После изменения порта нужно изменить redirect_uri приложения, зайдите на страницу: "
             "https://yoomoney.ru/settings/oauth-services"
         )
-        print("и в поле redirect_uri добавьте текущий порт: http://my.localhost:N")
+        print("и в поле redirect_uri добавьте текущий порт: https://my.localhost:N")
         exit(1)
 
     parts = redirect_uri.split(":")
@@ -85,6 +91,23 @@ def authorize(
             )
             exit(1)
 
+    module_path = Path(__file__).absolute().parent
+    if cert and not Path(cert).exists():
+        print(f"Сертификат по указанному пути[{cert}] не найден")
+        exit(1)
+    elif cert:
+        certfile = Path(cert)
+    else:
+        certfile = module_path / "certs" / "cert.pem"
+
+    if key and not Path(key).exists():
+        print(f"Ключ по указанному пути[{key}] не найден")
+        exit(1)
+    elif key:
+        keyfile = Path(key)
+    else:
+        keyfile = module_path / "certs" / "key.pem"
+
     auth = Authorization(client_id, redirect_uri)
     url = auth.authorization_request(scope=scope)
     print("\n".join([
@@ -92,7 +115,7 @@ def authorize(
         url,
         "",
         "После подтверждения вы получите access_token, его можно скопировать с web-страницы или консоли.",
-        f"Для отмены операции перейдите по адресу: http://{host}:{port}",
+        f"Для отмены операции перейдите по адресу: https://{host}:{port}",
         ""
     ]))
 
@@ -100,7 +123,17 @@ def authorize(
     handler.client_id = client_id
     handler.redirect_url = redirect_uri
     handler.auth_client = auth
-    with socketserver.TCPServer((host, port), CodeHandler) as httpd:
-        httpd.handle_request()
+    httpd = socketserver.TCPServer((host, port), CodeHandler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(
+        keyfile=keyfile,
+        certfile=certfile,
+    )
+    httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+
+    try:
+        httpd.serve_forever()
+    except SystemExit:
+        httpd.server_close()
 
     return handler.access_token
